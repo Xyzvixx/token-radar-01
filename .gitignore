@@ -1,0 +1,11 @@
+out/
+kit/
+node_modules/
+*.tar.gz
+*.tgz
+*.pem
+*.key
+.env
+keypair*.json
+wallet*.json
+.DS_Store
