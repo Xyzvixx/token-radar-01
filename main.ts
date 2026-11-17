@@ -22,9 +22,20 @@ import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 
-/** The scorer's own caps: the text cap shapes the bytes, the rest refuse. */
+/** A closed pipe must not fail a run that already wrote everything: only
+    EPIPE is swallowed, any other stream error still crashes the process. */
+function swallowEpipe(stream: NodeJS.WriteStream): void {
+  stream.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code !== 'EPIPE') throw err;
+  });
+}
+swallowEpipe(process.stdout);
+swallowEpipe(process.stderr);
+
+/** The scorer's own call: buildDossier('/output', { text_max_bytes: 65_536 }).
+    Match it exactly — the caps only refuse, and identical arguments remove one
+    divergence between this dossier and the scorer's rebuild. */
 const TEXT_MAX_BYTES = 65_536;
-const SCREENSHOT_CAPS = { max: 4, max_bytes: 524_288 };
 const IMAGE_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
 
 /** --name <value> out of the arguments, or the fallback. */
@@ -54,6 +65,8 @@ if (issue !== null) {
 }
 
 mkdirSync(out, { recursive: true });
+mkdirSync(join(out, 'dashboard'), { recursive: true });
+mkdirSync(join(out, 'screenshots'), { recursive: true });
 writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
 
 /** Copy one directory's regular files into `to`, skipping names that start with a dot. */
@@ -64,7 +77,14 @@ function copyFiles(from: string, to: string): string[] {
   for (const name of readdirSync(from)) {
     if (name.startsWith('.')) continue;
     const path = join(from, name);
-    if (!statSync(path).isFile()) continue;
+    let isFile = false;
+    try {
+      isFile = statSync(path).isFile();
+    } catch {
+      // A dangling symlink (or an entry that vanished) is skipped, not fatal.
+      isFile = false;
+    }
+    if (!isFile) continue;
     copyFileSync(path, join(to, name));
     copied.push(name);
   }
@@ -93,11 +113,7 @@ for (const name of shots) {
 // The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
 writeFileSync(
   join(out, 'dossier.json'),
-  buildDossier(out, {
-    text_max_bytes: TEXT_MAX_BYTES,
-    screenshots: SCREENSHOT_CAPS,
-    dashboard: { max_files: 400, max_bytes: 4_194_304 },
-  }),
+  buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES }),
 );
 
 process.stdout.write(
