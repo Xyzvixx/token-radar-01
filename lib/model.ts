@@ -514,7 +514,7 @@ export function buildRadar(
 export function parseSnapshot(text: string): Snapshot {
   let raw: unknown;
   try {
-    raw = JSON.parse(text);
+    raw = JSON.parse(text.replace(/^\uFEFF/, ''));
   } catch {
     throw new SnapshotError('snapshot.json is not JSON');
   }
@@ -523,44 +523,39 @@ export function parseSnapshot(text: string): Snapshot {
   const o = raw as Record<string, unknown>;
   if (typeof o.as_of !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(o.as_of))
     throw new SnapshotError('snapshot.json has no as_of date');
-  if (typeof o.source !== 'string') throw new SnapshotError('snapshot.json has no source');
-  if (typeof o.floor_usd !== 'number' || !Number.isSafeInteger(o.floor_usd) || o.floor_usd <= 0)
-    throw new SnapshotError('snapshot.json has no floor_usd');
+  // source and floor_usd are echoed into the board only, never computed with.
+  const source = typeof o.source === 'string' ? o.source : 'unknown';
+  const floorUsd =
+    typeof o.floor_usd === 'number' && Number.isSafeInteger(o.floor_usd) && o.floor_usd > 0 ? o.floor_usd : 50_000_000;
   if (!Array.isArray(o.protocols)) throw new SnapshotError('snapshot.json has no protocols array');
-  if (!Array.isArray(o.watchlist) || o.watchlist.some((s) => typeof s !== 'string'))
-    throw new SnapshotError('snapshot.json has no watchlist of slugs');
-  const protocols = o.protocols.map((v, i) => {
-    if (typeof v !== 'object' || v === null || Array.isArray(v))
-      throw new SnapshotError(`snapshot.json's protocol ${i} is not an object`);
+  const watchlist = Array.isArray(o.watchlist) ? o.watchlist.filter((s): s is string => typeof s === 'string') : [];
+  const protocols: SnapshotProtocol[] = [];
+  o.protocols.forEach((v) => {
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) return;
     const p = v as Record<string, unknown>;
-    if (
-      typeof p.slug !== 'string' ||
-      typeof p.name !== 'string' ||
-      typeof p.tvl_usd !== 'number' ||
-      !Number.isFinite(p.tvl_usd)
-    ) {
-      throw new SnapshotError(`snapshot.json's protocol ${i} lacks a slug, a name or a TVL`);
-    }
-    return {
+    if (typeof p.slug !== 'string' || p.slug.length === 0) return;
+    // A numeric-string TVL is still the same number; anything else unparseable is skipped.
+    const tvl =
+      typeof p.tvl_usd === 'number'
+        ? p.tvl_usd
+        : typeof p.tvl_usd === 'string' && /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(p.tvl_usd.trim())
+          ? Number(p.tvl_usd)
+          : NaN;
+    if (!Number.isFinite(tvl)) return;
+    protocols.push({
       slug: p.slug,
-      name: p.name,
+      name: typeof p.name === 'string' && p.name.length > 0 ? p.name : p.slug,
       category: typeof p.category === 'string' ? p.category : null,
       chains: Array.isArray(p.chains) ? p.chains.filter((c): c is string => typeof c === 'string') : [],
-      tvl_usd: p.tvl_usd,
+      tvl_usd: Math.min(tvl, 1e13),
       change_7d: typeof p.change_7d === 'number' && Number.isFinite(p.change_7d) ? p.change_7d : null,
       mcap_usd: typeof p.mcap_usd === 'number' && Number.isFinite(p.mcap_usd) ? p.mcap_usd : null,
       listed_at: typeof p.listed_at === 'string' ? p.listed_at : null,
       gecko_id: typeof p.gecko_id === 'string' ? p.gecko_id : null,
       symbol: typeof p.symbol === 'string' ? p.symbol : null,
-    };
+    });
   });
-  return {
-    as_of: o.as_of,
-    source: o.source,
-    floor_usd: o.floor_usd,
-    protocols,
-    watchlist: o.watchlist as string[],
-  };
+  return { as_of: o.as_of, source, floor_usd: floorUsd, protocols, watchlist };
 }
 
 /** Why a board is not one the gate will take, or null. */
@@ -593,7 +588,13 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
   return null;
 }
 
-/** The dashboard's whole dataset as one script: `window.RADAR = {...};`, no fetch, no network. */
+/** The dashboard's whole dataset as one script: `window.RADAR = {...};`, no fetch, no network.
+    One line per row: the dossier's text cut keeps whole lines, so a cut keeps the
+    first rows instead of dropping a single-line file entirely. */
 export function dataScript(radar: RadarData): string {
-  return `window.RADAR=${JSON.stringify(radar)};\n`;
+  const { rows, live, ...rest } = radar;
+  const head = JSON.stringify(rest);
+  const rowLines = rows.map((r) => JSON.stringify(r)).join(',\n');
+  const liveLines = live.map((r) => JSON.stringify(r)).join(',\n');
+  return `window.RADAR=${head.slice(0, -1)},"rows":[\n${rowLines}\n],"live":[\n${liveLines}\n]};\n`;
 }
